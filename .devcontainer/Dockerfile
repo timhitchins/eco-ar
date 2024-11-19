@@ -32,6 +32,6 @@ RUN pip install pipx && \
     pipx install poetry==${POETRY_VERSION} && \
     python -m venv ${VIRTUAL_ENV}
 
-WORKDIR /workspaces/python-one
+WORKDIR /app
 COPY pyproject.toml poetry.lock ./
 RUN poetry install --no-root
