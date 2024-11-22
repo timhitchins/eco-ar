@@ -10,7 +10,7 @@ ENV POETRY_VERSION=${POETRY_VERSION} \
     DISPLAY=99
 
 # Update PATH
-ENV PATH=$VIRTUAL_ENV/bin:/root/.local/bin:/home/vscode/.ebcli-virtual-env/.ebcli-virtual-env/executables:$PATH
+ENV PATH=$VIRTUAL_ENV/bin:/root/.local/bin:/app:$PATH
 
 # Install system dependencies
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \
