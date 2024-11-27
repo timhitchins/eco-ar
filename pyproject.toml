@@ -13,6 +13,7 @@ opencv-python = "^4.10.0.84"
 pytesseract = "^0.3.13"
 selenium = "^4.26.1"
 ipykernel = "^6.29.5"
+easyocr = "^1.7.2"
 
 
 [tool.poetry.group.dev.dependencies]
