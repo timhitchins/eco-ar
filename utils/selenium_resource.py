@@ -3,6 +3,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException
+import os
 import tempfile
 import shutil
 import time
@@ -11,9 +12,15 @@ import logging
 
 
 class SeleniumResource:
-    def __init__(self, max_retries: int = 3, connect_timeout: int = 30):
+
+    def __init__(
+        self,
+        download_dir_path: str,
+        max_retries: int = 3,
+        connect_timeout: int = 30,
+    ):
+        self._download_dir_path = download_dir_path
         self._driver: Optional[WebDriver] = None
-        self._download_dir_path: Optional[str] = None
         self._max_retries = max_retries
         self._connect_timeout = connect_timeout
         self._logger = logging.getLogger(__name__)
@@ -28,7 +35,7 @@ class SeleniumResource:
 
         while attempts < self._max_retries:
             try:
-                self._download_dir_path = tempfile.mkdtemp()
+                # self._download_dir_path = tempfile.mkdtemp()
 
                 # Create and configure the Chrome service
                 service = Service(
@@ -36,7 +43,8 @@ class SeleniumResource:
                 service.start()
 
                 # Create and configure Chrome options
-                options = self._set_chrome_options(self._download_dir_path)
+                self._setup_download_dir_path()
+                options = self._set_chrome_options(self.download_dir_path)
 
                 # Initialize the WebDriver with timeout
                 self._driver = webdriver.Chrome(
@@ -71,6 +79,19 @@ class SeleniumResource:
             f"Last error: {str(last_exception)}"
         )
 
+    def _setup_download_dir_path(self) -> None:
+        try:
+            path_exists = os.path.exists(self._download_dir_path)
+            if not path_exists:
+                self._logger.info(f"Creating download directory at {
+                                  self._download_dir_path}")
+                os.mkdir(self._download_dir_path)
+
+            self.download_dir_path = self._download_dir_path
+        except Exception as e:
+            self._logger.warning(
+                f"Error setting up download directory {self.download_dir_path!r}: {str(e)}")
+
     def _cleanup_failed_attempt(self) -> None:
         """Clean up resources after a failed attempt."""
         if self._driver:
@@ -80,13 +101,13 @@ class SeleniumResource:
                 self._logger.warning(f"Error cleaning up WebDriver: {str(e)}")
             self._driver = None
 
-        if self._download_dir_path:
+        if self.download_dir_path:
             try:
-                shutil.rmtree(self._download_dir_path)
+                shutil.rmtree(self.download_dir_path)
             except Exception as e:
                 self._logger.warning(
                     f"Error cleaning up download directory: {str(e)}")
-            self._download_dir_path = None
+            self.download_dir_path = ""
 
     def teardown_after_execution(self) -> None:
         """Safely tears down the Selenium WebDriver and cleans up resources."""
@@ -96,14 +117,6 @@ class SeleniumResource:
             except Exception as e:
                 self._logger.warning(f"Error quitting WebDriver: {str(e)}")
             self._driver = None
-
-        if self._download_dir_path:
-            try:
-                shutil.rmtree(self._download_dir_path)
-            except Exception as e:
-                self._logger.warning(
-                    f"Error removing download directory: {str(e)}")
-            self._download_dir_path = None
 
     def _set_chrome_options(self, download_dir: str) -> Options:
         """Sets Chrome options with improved stability settings."""
@@ -141,11 +154,3 @@ class SeleniumResource:
             raise RuntimeError(
                 "WebDriver not initialized. Call setup_for_execution() first.")
         return self._driver
-
-    @property
-    def download_dir_path(self) -> str:
-        """Returns the download directory path."""
-        if not self._download_dir_path:
-            raise RuntimeError(
-                "Download directory not initialized. Call setup_for_execution() first.")
-        return self._download_dir_path
