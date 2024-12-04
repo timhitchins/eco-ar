@@ -4,7 +4,7 @@ from utils.selenium_resource import SeleniumResource, TimeoutException
 def test_selenium_resource():
     # Create and initialize the Selenium resource
     selenium = SeleniumResource(
-        download_dir_path="/app/dowloads",
+        download_dir_path="/app/downloads-test",
         max_retries=3,
         connect_timeout=30,
     )
@@ -15,4 +15,6 @@ def test_selenium_resource():
     except TimeoutException as e:
         print(f"Failed to initialize Selenium: {e}")
     finally:
-        selenium.teardown_after_execution()
+        selenium.teardown_after_execution(
+            # remove test downloads
+        )

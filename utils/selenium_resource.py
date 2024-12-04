@@ -4,7 +4,6 @@ from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException
 import os
-import tempfile
 import shutil
 import time
 from typing import Optional
@@ -15,15 +14,17 @@ class SeleniumResource:
 
     def __init__(
         self,
-        download_dir_path: str,
+        download_dir_path: str = "/app/downloads",
         max_retries: int = 3,
         connect_timeout: int = 30,
     ):
-        self._download_dir_path = download_dir_path
+        self._logger = logging.getLogger(__name__)
+
+        self._download_dir_path = self._validate_download_dir_path(
+            download_dir_path)
         self._driver: Optional[WebDriver] = None
         self._max_retries = max_retries
         self._connect_timeout = connect_timeout
-        self._logger = logging.getLogger(__name__)
 
     def setup_for_execution(self) -> None:
         """
@@ -35,16 +36,13 @@ class SeleniumResource:
 
         while attempts < self._max_retries:
             try:
-                # self._download_dir_path = tempfile.mkdtemp()
 
                 # Create and configure the Chrome service
                 service = Service(
                     executable_path="/usr/local/bin/chromedriver")
                 service.start()
 
-                # Create and configure Chrome options
-                self._setup_download_dir_path()
-                options = self._set_chrome_options(self.download_dir_path)
+                options = self._set_chrome_options()
 
                 # Initialize the WebDriver with timeout
                 self._driver = webdriver.Chrome(
@@ -79,18 +77,19 @@ class SeleniumResource:
             f"Last error: {str(last_exception)}"
         )
 
-    def _setup_download_dir_path(self) -> None:
+    def _validate_download_dir_path(self, download_dir_path) -> str:
         try:
-            path_exists = os.path.exists(self._download_dir_path)
+            path_exists = os.path.exists(download_dir_path)
             if not path_exists:
                 self._logger.info(f"Creating download directory at {
-                                  self._download_dir_path}")
-                os.mkdir(self._download_dir_path)
+                                  download_dir_path}")
+                os.mkdir(download_dir_path)
 
-            self.download_dir_path = self._download_dir_path
+            return download_dir_path
         except Exception as e:
             self._logger.warning(
-                f"Error setting up download directory {self.download_dir_path!r}: {str(e)}")
+                f"Error setting up download directory {self._download_dir_path!r}: {str(e)}")
+            return ""
 
     def _cleanup_failed_attempt(self) -> None:
         """Clean up resources after a failed attempt."""
@@ -101,24 +100,25 @@ class SeleniumResource:
                 self._logger.warning(f"Error cleaning up WebDriver: {str(e)}")
             self._driver = None
 
-        if self.download_dir_path:
+        # Fix: Use the protected attribute directly during cleanup
+        if self._download_dir_path and os.path.exists(self._download_dir_path):
             try:
-                shutil.rmtree(self.download_dir_path)
+                shutil.rmtree(self._download_dir_path)
             except Exception as e:
                 self._logger.warning(
                     f"Error cleaning up download directory: {str(e)}")
-            self.download_dir_path = ""
 
     def teardown_after_execution(self) -> None:
         """Safely tears down the Selenium WebDriver and cleans up resources."""
         if self._driver:
             try:
                 self._driver.quit()
+
             except Exception as e:
                 self._logger.warning(f"Error quitting WebDriver: {str(e)}")
             self._driver = None
 
-    def _set_chrome_options(self, download_dir: str) -> Options:
+    def _set_chrome_options(self) -> Options:
         """Sets Chrome options with improved stability settings."""
         chrome_options = Options()
 
@@ -138,7 +138,7 @@ class SeleniumResource:
         # Configure preferences
         chrome_prefs = {
             "profile.default_content_settings": {"images": 2},
-            "download.default_directory": download_dir,
+            "download.default_directory": self._download_dir_path,
             "download.prompt_for_download": False,
             "download.directory_upgrade": True,
             "safebrowsing.enabled": True
