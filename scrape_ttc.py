@@ -15,6 +15,7 @@ from typing import Iterable
 from itertools import chain
 import os
 import pickle
+import time
 
 
 def get_periodical_content_by_page(
@@ -140,7 +141,56 @@ def scrape_ttc_periodicals(
         return None
 
 
-###################
+def download_issuu(
+
+    issuu_url: str,
+    issuudownload_url: str = "https://issuudownload.com/",
+    client=SeleniumResource(),
+    scraper=WebScraper(),
+):
+    client.setup_for_execution()
+    driver = client.driver
+    # Navigate to tag page
+
+    driver.get(issuudownload_url)
+    input = scraper.wait_and_find_element(
+        driver,
+        By.CSS_SELECTOR,
+        '#DocumentUrl'
+    )
+
+    input.clear()
+    input.send_keys(issuu_url)
+
+    submit_button = scraper.wait_and_find_element(
+        driver,
+        By.CSS_SELECTOR,
+        'button.btn.btn-primary'
+    )
+
+    submit_button.click()
+    time.sleep(5)
+
+    save_all_button = scraper.wait_and_find_element(
+        driver,
+        By.ID,
+        'btPdfDownload'
+    )
+
+    save_all_button.click()
+    time.sleep(5)
+
+    download_button = scraper.wait_and_find_element(
+        driver,
+        By.CSS_SELECTOR,
+        'a.btn.btn-outline-success'
+    )
+
+    download_link = download_button.get_attribute('href')
+
+    return download_link
+
+    ###################
 if __name__ == "__main__":
     pickle_file = "./periodicals.pkl"
     if os.path.exists(pickle_file):
@@ -152,5 +202,7 @@ if __name__ == "__main__":
         with open(pickle_file, 'wb') as file:  # type: ignore[assignment]
             pickle.dump(periodicals, file)
 
-    # download issuus
-    ...
+        # download issuus
+    download_issuu(
+        issuu_url=periodicals[0].ttc_items[0].issuu_url
+    )
