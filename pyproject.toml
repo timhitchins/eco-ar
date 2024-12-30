@@ -15,6 +15,11 @@ ipykernel = "^6.29.5"
 types-selenium = "^3.141.9"
 pytesseract = "^0.3.13"
 easyocr = "^1.7.2"
+httpx = "^0.28.1"
+aiohttp = "^3.11.10"
+tqdm = "^4.67.1"
+requests = "^2.32.3"
+types-requests = "^2.32.0.20241016"
 
 
 [tool.poetry.group.dev.dependencies]
