@@ -54,4 +54,4 @@ RUN pip install pipx && \
 # Set working directory and install dependencies
 WORKDIR /app
 COPY pyproject.toml poetry.lock ./
-RUN poetry install --no-root
+# RUN poetry install --no-root

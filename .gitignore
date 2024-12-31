@@ -1,0 +1,10 @@
+*.log
+*.env
+*.pyc
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.pkl
+*.pdf
