@@ -1,364 +1,277 @@
-from urllib3.util.retry import Retry
-from requests.exceptions import RequestException, HTTPError, ConnectionError, Timeout
-from requests.adapters import HTTPAdapter
-from utils.dataclass import (
-    IssuuItem,
-    TTCContent,
-)
-from utils.scraper import ScraperUtils
-from utils.selenium_resource import SeleniumResource
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import (
-    StaleElementReferenceException,
-    NoSuchElementException,
-)
-from urllib.parse import urlparse
-import logging
-from typing import List, Optional
-from itertools import chain
 import os
 import pickle
-from tqdm import tqdm
 import time
+from pathlib import Path
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional
+from tqdm import tqdm
 import requests
-import multiprocessing
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+from requests.exceptions import HTTPError, ConnectionError, Timeout
+
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException
+from utils.logger import setup_logger
+from utils.dataclass import IssuuItem, TTCContent
+from utils.scraper import ScraperUtils
+from utils.selenium_resource import SeleniumResource
 
 
 class TTCScraper:
+    """Scrapes periodicals and manages cached content."""
+
     def __init__(
         self,
-        client=SeleniumResource(),
-        utils=ScraperUtils(logger_name="Periodical Scraper"),
-        pickle_dir: str = "./.run_cache"
+        client: SeleniumResource = SeleniumResource(),
+        utils: ScraperUtils = ScraperUtils(logger_name="Periodical Scraper"),
+        pickle_dir: str = "./.run_cache",
     ):
         self._client = client
-        self._client.setup_for_execution()
         self._utils = utils
-        self._pickle_dir = pickle_dir
+        self._pickle_dir = Path(pickle_dir)
+        self._pickle_dir.mkdir(parents=True, exist_ok=True)
+        self._logger = setup_logger(logger_name="TTC Scraper")
 
-    def _load_periodical_page_content(
-        self,
-        pickle_name: str = "periodicals.pkl"
-    ) -> List[TTCContent] | None:
-        pickle_path = f"{self._pickle_dir}./{pickle_name}"
-        if os.path.exists(pickle_path):
-            with open(pickle_path, "rb") as file:
-                periodicals = pickle.load(file)
-                return periodicals
-        else:
-            return None
+    def _load_cached_content(self, pickle_name: str) -> Optional[List[TTCContent]]:
+        pickle_path = self._pickle_dir / pickle_name
+        if pickle_path.exists():
+            with pickle_path.open("rb") as file:
+                return pickle.load(file)
+        return None
 
-    def _dump_periodical_page_content(
-        self,
-        pickle_name: str = "periodicals.pkl"
-    ) -> str:
-        pickle_path = f"{self._pickle_dir}./{pickle_name}"
-        with open(pickle_path, "wb") as file:
-            pickle.dump(self._periodicals, file)
-        return pickle_path
+    def _dump_cached_content(self, content: List[TTCContent], pickle_name: str) -> None:
+        pickle_path = self._pickle_dir / pickle_name
+        with pickle_path.open("wb") as file:
+            pickle.dump(content, file)
 
-    def _get_periodical_content_by_page(
-        self,
-        page_url: str
-    ) -> List[TTCContent] | None:
+    def _get_periodical_content_by_page(self, page_url: str) -> List[TTCContent]:
+        driver = self._client.driver
         try:
-            driver = self._client.driver
-            # Navigate to tag page
-
             driver.get(page_url)
-
-            # Get content results
             content_results = self._utils.wait_and_find_elements(
-                driver,
-                By.CLASS_NAME,
-                "results_content"
-            )
-
+                driver, By.CLASS_NAME, "results_content")
             ttc_content = []
+
             for result in content_results:
                 try:
-                    # Get the Category type. Include only periodicals.
-
-                    category_labels = [category.text for category in result.find_elements(
-                        By.CSS_SELECTOR,
-                        "h3 a[rel]"
-                    )]
-
+                    category_labels = [
+                        category.text for category in result.find_elements(By.CSS_SELECTOR, "h3 a[rel]")
+                    ]
                     if "PERIODICALS" not in category_labels:
                         continue
 
-                    # Get title from the current result element
-                    result_title = result.find_element(By.TAG_NAME, "h1")
-                    if not result_title:
-                        self._utils.logger.warning(
-                            "No title found for content result")
-                        continue
-
-                    title_text = result_title.text
-                    self._utils.logger.info(
-                        f"Found title for result {title_text}")
-
-                    # Get links with images
+                    title_element = result.find_element(By.TAG_NAME, "h1")
+                    title_text = title_element.text if title_element else "Unknown Title"
                     links_with_images = result.find_elements(
-                        By.CSS_SELECTOR,
-                        "a:has(img)",
-                    )
-                    if not links_with_images:
-                        self._utils.logger.warning("No links with images")
-                        continue
+                        By.CSS_SELECTOR, "a:has(img)")
 
-                    ttc_issuus = []
-                    for link_img in links_with_images:
-                        issuu_href = self._utils.get_attribute_safely(
-                            link_img, "href")
-                        parsed_issuu_href = urlparse(issuu_href)
-                        issuu_url = f"{
-                            parsed_issuu_href.scheme}://{parsed_issuu_href.netloc}{parsed_issuu_href.path}"
-
-                        img_element = link_img.find_element(
-                            By.TAG_NAME,
-                            "img",
+                    ttc_issuus = [
+                        IssuuItem(
+                            issuu_name=urlparse(img.get_attribute(
+                                "src")).path.split("/")[-1],
+                            issuu_url=link.get_attribute("href"),
+                            issuu_img_src=img.get_attribute("src"),
                         )
-                        if not img_element:
-                            continue
+                        for link in links_with_images if (img := link.find_element(By.TAG_NAME, "img"))
+                    ]
 
-                        issuu_img_src = self._utils.get_attribute_safely(
-                            img_element, "src")
-                        if not issuu_href or not issuu_img_src:
-                            continue
+                    ttc_content.append(TTCContent(
+                        ttc_content_title=title_text, ttc_items=ttc_issuus))
+                except (StaleElementReferenceException, NoSuchElementException):
+                    self._logger.warning(
+                        "Element reference lost or missing during processing.")
 
-                        issu_name = urlparse(issuu_img_src).path.strip(
-                            "/").split("/")[-1]
-                        issuu_item = IssuuItem(
-                            issuu_name=issu_name,
-                            issuu_url=issuu_url,
-                            issuu_img_src=issuu_img_src
-                        )
-                        ttc_issuus.append(issuu_item)
-
-                    ttc_content_result = TTCContent(
-                        ttc_content_title=result_title.text,
-                        ttc_items=ttc_issuus.copy()
-                    )
-                    ttc_content.append(ttc_content_result)
-
-                except StaleElementReferenceException:
-                    continue
-                except NoSuchElementException:
-                    logging.warning("Missing h1 tag in result.")
-                    continue
-                except StaleElementReferenceException:
-                    logging.warning(
-                        "Result became stale, skipping")
-                    continue
             return ttc_content
         except Exception as e:
-            self._utils.logger.error(f"An error occurred: {str(e)}")
-            return None
+            self._logger.error(f"Failed to scrape {page_url}: {e}")
+            self._client._cleanup_failed_attempt()
+            return []
         finally:
             self._client.teardown_after_execution()
 
-    def scrape_ttc_periodicals(
-        self,
-        root_page_url: str = "https://thetalonconspiracy.com/category/periodicals/page/",
-        pages: int = 10,
-    ) -> List[TTCContent] | None:
-        try:
+    def scrape_periodicals(self, root_url: str, pages: int, cache_file: str) -> List[TTCContent]:
+        cached_content = self._load_cached_content(cache_file)
+        if cached_content:
+            return cached_content
 
-            loaded_periodicals = self._load_periodical_page_content()
+        periodical_urls = [f"{root_url}{
+            page_num}" for page_num in range(1, pages + 1)]
+        all_content = []
 
-            if not loaded_periodicals:
+        for url in tqdm(periodical_urls, desc="Scraping Periodicals"):
+            page_content = self._get_periodical_content_by_page(url)
+            all_content.extend(page_content)
 
-                periodical_urls = [f"{root_page_url}{
-                    page_num}" for page_num in range(1, pages+1)]
-
-                self._periocical_url: List[str] = periodical_urls
-
-                periodical_content = [self._get_periodical_content_by_page(
-                    url) for url in periodical_urls]
-
-                periodicals: List[TTCContent] = list(chain(*periodical_content)  # type: ignore[arg-type]
-                                                     )
-                self._periodicals = periodicals
-                self._dump_periodical_page_content()
-            else:
-                self._periodicals = loaded_periodicals
-            return self._periodicals
-        except Exception as e:
-            self._utils.logger.error(f"TTC periodical scrape failed: {e}")
-            raise
-
-# Generic functions Issuu Items
+        self._dump_cached_content(all_content, cache_file)
+        return all_content
 
 
 def download_issuu(
     issuu_item: IssuuItem,
     issuudownload_url: str = "https://issuudownload.com/",
-    issuu_pdfs_dir: str = "/app/issuu_pdfs/",
-    worker: Optional[int] = None
+    issuu_pdfs_dir: str = "/app/issuu_pdfs_dev/",
 ) -> IssuuItem:
+    """Download PDF content from Issuu using Selenium and requests.
+
+    Args:
+        issuu_item (IssuuItem): The Issuu item containing URL and metadata.
+        issuudownload_url (str): The URL of the Issuu downloader.
+        issuu_pdfs_dir (str): Directory to save downloaded PDFs.
+        worker (Optional[int]): Identifier for multiprocessing workers.
+
+    Returns:
+        IssuuItem: Updated IssuuItem with download link and filepath.
+    """
+    utils = ScraperUtils(logger_name="Issuu Download")
+    client = SeleniumResource()
+    session = None
+    logger = setup_logger(logger_name="Download Issuu")
+
     try:
         if not issuu_item.issuu_download_link and not issuu_item.issuu_filepath:
-            utils = ScraperUtils(
-                logger_name=f"Issuu Downloads for worker: {worker}")
-            client = SeleniumResource()
+            # Setup Selenium client and navigate to the Issuu downloader page.
             client.setup_for_execution()
+            driver = client.driver
+            driver.get(issuudownload_url)
 
-            client.driver.get(issuudownload_url)
-
-            # Find and input the URL
+            # Locate and fill the input field with the Issuu URL.
             input_field = utils.wait_and_find_element(
-                client.driver,
+                driver,
                 By.CSS_SELECTOR,
                 '#DocumentUrl',
-                timeout=50,
+                timeout=50
             )
             if not input_field:
-                raise ValueError("Input field not found")
-
+                raise ValueError(
+                    "Input field not found on Issuu downloader page.")
             input_field.clear()
             input_field.send_keys(issuu_item.issuu_url)
 
-            # Click the submit button
+            # Locate and click the submit button.
             submit_button = utils.wait_and_find_element(
-                client.driver,
+                driver,
                 By.CSS_SELECTOR,
                 'button.btn.btn-primary'
             )
             if not submit_button:
-                raise ValueError("Submit button not found")
+                raise ValueError("Submit button not found.")
             submit_button.click()
-            time.sleep(5)
+            time.sleep(15)
 
-            # Click the save all button
+            # Locate and click the "Save All" button.
             save_all_button = utils.wait_and_find_element(
-                client.driver,
+                driver,
                 By.ID,
-                'btPdfDownload'
+                'btPdfDownload',
+                timeout=15,
             )
             if not save_all_button:
-                raise ValueError("Save All button not found")
+                logger.error("Save All button not found.")
+                raise ValueError("Save All button not found.")
             save_all_button.click()
-            time.sleep(5)
+            time.sleep(30)
 
-            # Get the download link
+            # Retrieve the download link.
             download_button = utils.wait_and_find_element(
-                client.driver,
+                driver,
                 By.CSS_SELECTOR,
-                'a.btn.btn-outline-success'
+                'a.btn.btn-outline-success',
+                timeout=30,
             )
             if not download_button:
-                raise ValueError("Download button not found")
-
+                logger.error("Download button not found.")
+                raise ValueError("Download button not found.")
             download_link = download_button.get_attribute('href')
             if not download_link:
-                raise ValueError("Download link is empty")
+                logger.error("Download link is empty.")
+                raise ValueError("Download link is empty.")
 
-            # Save the download link to the item
-            utils.logger.info(f"Download link obtained: {download_link}")
-            # update IssuuItem dataclass
             issuu_item.issuu_download_link = download_link
+            logger.info(f"Download link obtained: {download_link}")
 
+            # Download the file using the Requests library.
             session = requests.Session()
             retries = Retry(
                 total=5,
-                backoff_factor=.05,
-                # Retry on server errors
+                backoff_factor=0.5,
                 status_forcelist=[500, 502, 503, 504],
-                allowed_methods=["GET"],  # Retry only GET requests
+                allowed_methods=["GET"]
             )
             session.mount("http://", HTTPAdapter(max_retries=retries))
             session.mount("https://", HTTPAdapter(max_retries=retries))
 
-            try:
+            if not os.path.exists(issuu_pdfs_dir):
+                os.makedirs(issuu_pdfs_dir)
 
-                if not os.path.exists(issuu_pdfs_dir):
-                    os.makedirs(issuu_pdfs_dir)
+            response = session.get(download_link, timeout=10)
+            response.raise_for_status()
 
-                # Perform the GET request
-                response = session.get(download_link, timeout=10)
-                response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
+            # Generate file name and save the file.
+            filename = os.path.basename(
+                urlparse(issuu_item.issuu_url).path) + ".pdf"
+            filepath = os.path.join(issuu_pdfs_dir, filename)
+            with open(filepath, 'wb') as file:
+                file.write(response.content)
 
-                # Extract the filename
-                filename = os.path.basename(
-                    urlparse(issuu_item.issuu_url).path)
-                filename = f"{filename}.pdf"
-                filepath = os.path.join(issuu_pdfs_dir, filename)
+            issuu_item.issuu_filepath = filepath
+            logger.info(f"File saved successfully at: {filepath}")
 
-                # Save the file
-                with open(filepath, 'wb') as file:
-                    file.write(response.content)
+    except (HTTPError, ConnectionError, Timeout) as e:
+        logger.error(f"Failed to download PDF: {e}")
+        client._cleanup_failed_attempt()
 
-                # Update the IssuuItem dataclass
-                issuu_item.issuu_filepath = filepath
-                return issuu_item
+        raise Exception(
+            f"Download failed for {issuu_item.issuu_url}. Reason: {e}"
+        )
 
-            except (HTTPError, ConnectionError, Timeout) as e:
-                raise Exception(f"Failed to download PDF from: {
-                                download_link} due to: {e}")
-            except RequestException as e:
-                raise Exception(
-                    f"An unexpected error occurred while downloading PDF: {e}")
-            finally:
-                if session:
-                    session.close()
-        else:
-            return issuu_item
     except Exception as e:
-        if client:
-            client._cleanup_failed_attempt()
-        utils.logger.error(f"Error processing {issuu_item.issuu_url}: {e}")
-        return issuu_item  # Return the item even if failed
+        logger.error(f"Unexpected error during Issuu download: {e}")
+        client._cleanup_failed_attempt()
+        raise
+
     finally:
-        if client and client.driver:
-            try:
-                client.driver.quit()
-            except Exception as quit_error:
-                utils.logger.warning(
-                    f"Failed to quit WebDriver: {quit_error}")
-        client.teardown_after_execution()
+        # Cleanup Selenium client.
+        try:
+            client.teardown_after_execution()
+            # Close the session.
+            if session:
+                session.close()
+
+        except Exception as quit_error:
+            logger.warning(f"Failed to quit WebDriver: {quit_error}")
+        return issuu_item
 
 
-def download_issuu_pdfs(issuu_items: List[IssuuItem]) -> List[IssuuItem]:
-    max_processes = 8
-    num_processes = min(multiprocessing.cpu_count(), max_processes)
-    pool = multiprocessing.Pool(processes=num_processes)
-
-    processed_items = []
-    with tqdm(total=len(issuu_items), desc="Downloading PDFs") as pbar:
+def download_issuu_pdfs(issuu_items: List[IssuuItem], max_workers: int = 8) -> List[IssuuItem]:
+    logger = setup_logger(logger_name="Dowload Issuu PDFs")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(download_issuu, item): item for item in issuu_items}
         results = []
 
-        for idx, item in enumerate(issuu_items):
-            result = pool.apply_async(
-                download_issuu, args=(item, "https://issuudownload.com/", "/app/issuu_pdfs", idx))
-            results.append(result)
-
-        for result in results:
+        for future in tqdm(as_completed(futures), total=len(issuu_items), desc="Downloading PDFs"):
             try:
-                processed_item = result.get()  # Get the result from the async process
-                processed_items.append(processed_item)
+                results.append(future.result())
             except Exception as e:
-                print(f"Error processing item: {e}")
-            pbar.update(1)
-
-    # Close the pool
-    pool.close()
-    pool.join()
-
-    return processed_items  # Return the list of processed items
+                logger.error(f"Error downloading an item: {e}")
+        return results
 
 
-    ###################
 if __name__ == "__main__":
-
     scraper = TTCScraper()
-    periodicals = scraper.scrape_ttc_periodicals()
+    root_url = "https://thetalonconspiracy.com/category/periodicals/page/"
+    cache_file = "periodicals.pkl"
+    pages_to_scrape = 10
 
-    if periodicals:
-        updated_ttc_content: List[TTCContent] = []
-        for content in periodicals:
-            updated_issuus = download_issuu_pdfs(content.ttc_items)
-            content.ttc_items = updated_issuus
-            updated_ttc_content.append(content)
-        scraper._periodicals = updated_ttc_content
-        scraper._dump_periodical_page_content(pickle_name="ttc_content.pkl")
+    periodicals = scraper.scrape_periodicals(
+        root_url, pages_to_scrape, cache_file
+    )
+
+    content_with_pdfs: List[TTCContent] = []
+    for content in periodicals:
+        content.ttc_items = download_issuu_pdfs(content.ttc_items)
+        content_with_pdfs.append(content)
+
+    scraper._dump_cached_content(
+        content_with_pdfs, "ttc_content_with_pdfs.pkl")

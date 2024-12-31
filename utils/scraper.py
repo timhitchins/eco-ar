@@ -1,4 +1,4 @@
-from .logger import setup_logging
+from .logger import setup_logger
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -19,7 +19,7 @@ class ScraperUtils:
     ):
         self.max_retries = max_retries
         self.timeout = timeout
-        self.logger = setup_logging(
+        self.logger = setup_logger(
             logger_name=logger_name
         )
 
@@ -50,7 +50,7 @@ class ScraperUtils:
     def wait_and_find_elements(
         self,
         driver,
-        by: By,
+        by: By | str,
         value: str,
         timeout: Optional[int] = None
     ) -> List[Any]:
